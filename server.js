@@ -1,3 +1,4 @@
+
 const express = require("express");
 const session = require("express-session");
 const bcrypt = require("bcrypt");
@@ -15,227 +16,432 @@ app.use(express.static(path.join(__dirname, "public")));
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "discuss-hub-secure-session-key",
+    secret:
+      process.env.SESSION_SECRET ||
+      "discuss-hub-secure-session-key",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production" && process.env.COOKIE_SECURE === "true",
+      secure:
+        process.env.NODE_ENV === "production" &&
+        process.env.COOKIE_SECURE === "true",
       maxAge: 24 * 60 * 60 * 1000,
     },
   })
 );
 
+// Ensure MongoDB is connected before processing API requests.
+app.use(async (req, res, next) => {
+  if (!req.path.startsWith("/api")) {
+    return next();
+  }
+
+  try {
+    await db.ensureConnected();
+    return next();
+  } catch (error) {
+    console.error(
+      `[Database Error on ${req.method} ${req.path}]:`,
+      error.message
+    );
+
+    return res.status(503).json({
+      error:
+        "Database connection failed. Please try again in a moment.",
+    });
+  }
+});
+
 function requireLogin(req, res, next) {
   if (!req.session.user) {
-    return res.status(401).json({ error: "Please log in first." });
+    return res.status(401).json({
+      error: "Please log in first.",
+    });
   }
+
   next();
 }
 
-app.get("/api/status", (req, res) => {
-  const info = db.getDbInfo();
-  res.json({
-    message: "Discussion Forum API is running",
-    database: info.type,
-    databaseDetails: info.details,
-  });
+// API status
+app.get("/api/status", async (req, res) => {
+  try {
+    await db.ensureConnected();
+    const info = db.getDbInfo();
+
+    return res.status(200).json({
+      message: "Discussion Forum API is running",
+      database: info.type,
+      databaseDetails: info.details,
+    });
+  } catch (error) {
+    console.error("[Database Status Error]:", error.message);
+
+    const info = db.getDbInfo();
+
+    return res.status(503).json({
+      message: "Discussion Forum API is running",
+      database: info.type,
+      databaseDetails: "Database connection failed",
+    });
+  }
 });
 
+// Signup
 app.post("/api/signup", async (req, res) => {
-  if (!db.isReady()) {
-    return res.status(503).json({ error: "Database is not configured yet." });
-  }
-
   try {
     const { name, email, password } = req.body;
 
     if (!name?.trim() || !email?.trim() || !password) {
-      return res.status(400).json({ error: "Please fill in all fields." });
+      return res.status(400).json({
+        error: "Please fill in all fields.",
+      });
     }
 
     if (password.length < 8) {
-      return res.status(400).json({ error: "Password must have at least 8 characters." });
+      return res.status(400).json({
+        error: "Password must have at least 8 characters.",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const existing = await db.User.findOne({
+      email: normalizedEmail,
+    });
+
+    if (existing) {
+      return res.status(409).json({
+        error: "This email is already registered.",
+      });
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    const [result] = await db.execute(
-      "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
-      [name.trim(), email.trim().toLowerCase(), passwordHash]
-    );
+    const newUser = await db.User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      password_hash: passwordHash,
+    });
 
     req.session.user = {
-      id: result.insertId,
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
+      id: newUser._id.toString(),
+      name: newUser.name,
+      email: newUser.email,
     };
 
-    res.status(201).json({ message: "Account created successfully.", user: req.session.user });
+    return res.status(201).json({
+      message: "Account created successfully.",
+      user: req.session.user,
+    });
   } catch (error) {
-    if (error.code === "ER_DUP_ENTRY" || (error.message && error.message.includes("UNIQUE"))) {
-      return res.status(409).json({ error: "This email is already registered." });
+    if (error.code === 11000) {
+      return res.status(409).json({
+        error: "This email is already registered.",
+      });
     }
+
     console.error("Signup error:", error);
-    res.status(500).json({ error: "Could not create account." });
+
+    return res.status(500).json({
+      error: "Could not create account.",
+    });
   }
 });
 
+// Login
 app.post("/api/login", async (req, res) => {
-  if (!db.isReady()) {
-    return res.status(503).json({ error: "Database is not configured yet." });
-  }
-
   try {
     const { email, password } = req.body;
 
     if (!email?.trim() || !password) {
-      return res.status(400).json({ error: "Please enter your email and password." });
+      return res.status(400).json({
+        error: "Please enter your email and password.",
+      });
     }
 
-    const [rows] = await db.execute(
-      "SELECT id, name, email, password_hash FROM users WHERE email = ?",
-      [String(email || "").trim().toLowerCase()]
-    );
+    const normalizedEmail = email.trim().toLowerCase();
 
-    if (!rows.length || !(await bcrypt.compare(password || "", rows[0].password_hash))) {
-      return res.status(401).json({ error: "Invalid email or password." });
+    const user = await db.User.findOne({
+      email: normalizedEmail,
+    });
+
+    if (
+      !user ||
+      !(await bcrypt.compare(password, user.password_hash))
+    ) {
+      return res.status(401).json({
+        error: "Invalid email or password.",
+      });
     }
 
     req.session.user = {
-      id: rows[0].id,
-      name: rows[0].name,
-      email: rows[0].email,
+      id: user._id.toString(),
+      name: user.name,
+      email: user.email,
     };
 
-    res.json({ message: "Login successful.", user: req.session.user });
+    return res.json({
+      message: "Login successful.",
+      user: req.session.user,
+    });
   } catch (error) {
     console.error("Login error:", error);
-    res.status(500).json({ error: "Could not log in." });
+
+    return res.status(500).json({
+      error: "Could not log in.",
+    });
   }
 });
 
+// Logout
 app.post("/api/logout", (req, res) => {
-  req.session.destroy(() => {
+  req.session.destroy((error) => {
+    if (error) {
+      console.error("Logout error:", error);
+      return res.status(500).json({
+        error: "Could not log out.",
+      });
+    }
+
     res.clearCookie("connect.sid");
-    res.json({ message: "Logged out successfully." });
+    return res.json({
+      message: "Logged out successfully.",
+    });
   });
 });
 
+// Current user
 app.get("/api/me", (req, res) => {
-  res.json({ user: req.session.user || null });
+  return res.json({
+    user: req.session.user || null,
+  });
 });
 
-app.get("/api/questions", async (req, res) => {
-  if (!db.isReady()) {
-    return res.json({ questions: [], demoMode: true });
-  }
+// Escape special characters in search terms.
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
+// Get questions and search
+app.get("/api/questions", async (req, res) => {
   try {
     const search = String(req.query.search || "").trim();
-    const searchPattern = `%${search}%`;
-    const [questions] = await db.execute(
-      `SELECT q.id, q.title, q.body, q.category, q.created_at, u.name AS author,
-              (SELECT COUNT(*) FROM answers a WHERE a.question_id = q.id) AS answer_count
-       FROM questions q
-       JOIN users u ON u.id = q.user_id
-       WHERE q.title LIKE ? OR q.body LIKE ? OR q.category LIKE ?
-       ORDER BY q.created_at DESC`,
-      [searchPattern, searchPattern, searchPattern]
-    );
+    const category = String(req.query.category || "").trim();
 
-    res.json({ questions });
+    const conditions = [];
+
+    if (search) {
+      const searchRegex = new RegExp(escapeRegex(search), "i");
+
+      conditions.push({
+        $or: [
+          { title: searchRegex },
+          { body: searchRegex },
+          { category: searchRegex },
+        ],
+      });
+    }
+
+    if (category && category.toLowerCase() !== "all") {
+      conditions.push({
+        category: new RegExp(
+          `^${escapeRegex(category)}$`,
+          "i"
+        ),
+      });
+    }
+
+    const filter =
+      conditions.length > 0 ? { $and: conditions } : {};
+
+    const questions = await db.Question.find(filter)
+      .populate("user_id", "name")
+      .sort({ created_at: -1 })
+      .lean();
+
+    const formatted = questions.map((q) => ({
+      id: q._id.toString(),
+      title: q.title,
+      body: q.body,
+      category: q.category || "General",
+      created_at: q.created_at,
+      author: q.user_id ? q.user_id.name : "Student",
+      answer_count: q.answer_count || 0,
+    }));
+
+    return res.json({ questions: formatted });
   } catch (error) {
     console.error("Get questions error:", error);
-    res.status(500).json({ error: "Could not load questions." });
+
+    return res.status(500).json({
+      error: "Could not load questions.",
+    });
   }
 });
 
+// Post a question
 app.post("/api/questions", requireLogin, async (req, res) => {
-  if (!db.isReady()) {
-    return res.status(503).json({ error: "Database is not configured yet." });
-  }
-
   try {
     const title = req.body.title;
     const body = req.body.body || req.body.description;
     const category = req.body.category || "General";
 
     if (!title?.trim() || !body?.trim()) {
-      return res.status(400).json({ error: "Enter both a title and question details." });
+      return res.status(400).json({
+        error: "Enter both a title and question details.",
+      });
     }
 
-    const [result] = await db.execute(
-      "INSERT INTO questions (user_id, title, body, category) VALUES (?, ?, ?, ?)",
-      [req.session.user.id, title.trim(), body.trim(), category.trim()]
-    );
+    const question = await db.Question.create({
+      user_id: req.session.user.id,
+      title: title.trim(),
+      body: body.trim(),
+      category: category.trim(),
+      answer_count: 0,
+    });
 
-    res.status(201).json({ message: "Question posted.", id: result.insertId });
-  } catch (error) {
-    console.error("Post question error:", error);
-    res.status(500).json({ error: "Could not post question." });
-  }
-});
-
-app.get("/api/questions/:id/answers", async (req, res) => {
-  if (!db.isReady()) {
-    return res.json({ answers: [], demoMode: true });
-  }
-
-  try {
-    const [answers] = await db.execute(
-      `SELECT a.id, a.body, a.created_at, u.name AS author
-       FROM answers a JOIN users u ON u.id = a.user_id
-       WHERE a.question_id = ?
-       ORDER BY a.created_at ASC`,
-      [req.params.id]
-    );
-
-    res.json({ answers });
-  } catch (error) {
-    console.error("Get answers error:", error);
-    res.status(500).json({ error: "Could not load answers." });
-  }
-});
-
-app.post("/api/questions/:id/answers", requireLogin, async (req, res) => {
-  if (!db.isReady()) {
-    return res.status(503).json({ error: "Database is not configured yet." });
-  }
-
-  try {
-    const { body } = req.body;
-
-    if (!body?.trim()) {
-      return res.status(400).json({ error: "Please write an answer." });
-    }
-
-    const [result] = await db.execute(
-      "INSERT INTO answers (question_id, user_id, body) VALUES (?, ?, ?)",
-      [req.params.id, req.session.user.id, body.trim()]
-    );
-
-    res.status(201).json({ message: "Answer posted.", id: result.insertId });
-  } catch (error) {
-    console.error("Post answer error:", error);
-    res.status(500).json({ error: "Could not post answer." });
-  }
-});
-
-async function startServer() {
-  try {
-    const dbInfo = await db.initDatabase();
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`--------------------------------------------------`);
-      console.log(`Discussion Forum running at http://localhost:${PORT}`);
-      console.log(`Active Database: ${dbInfo.details}`);
-      console.log(`--------------------------------------------------`);
+    return res.status(201).json({
+      message: "Question posted.",
+      id: question._id.toString(),
     });
   } catch (error) {
-    console.error("Database connection failed:", error.message);
-    process.exit(1);
+    console.error("Post question error:", error);
+
+    return res.status(500).json({
+      error: "Could not post question.",
+    });
+  }
+});
+
+// Get answers
+app.get("/api/questions/:id/answers", async (req, res) => {
+  try {
+    const questionId = req.params.id;
+
+    if (!db.isValidObjectId(questionId)) {
+      return res.status(400).json({
+        error: "Invalid question ID.",
+      });
+    }
+
+    const answers = await db.Answer.find({
+      question_id: questionId,
+    })
+      .populate("user_id", "name")
+      .sort({ created_at: 1 })
+      .lean();
+
+    const formatted = answers.map((answer) => ({
+      id: answer._id.toString(),
+      body: answer.body,
+      created_at: answer.created_at,
+      author: answer.user_id
+        ? answer.user_id.name
+        : "Student",
+    }));
+
+    return res.json({ answers: formatted });
+  } catch (error) {
+    console.error("Get answers error:", error);
+
+    return res.status(500).json({
+      error: "Could not load answers.",
+    });
+  }
+});
+
+// Post an answer
+app.post(
+  "/api/questions/:id/answers",
+  requireLogin,
+  async (req, res) => {
+    try {
+      const questionId = req.params.id;
+
+      if (!db.isValidObjectId(questionId)) {
+        return res.status(400).json({
+          error: "Invalid question ID.",
+        });
+      }
+
+      const { body } = req.body;
+
+      if (!body?.trim()) {
+        return res.status(400).json({
+          error: "Please write an answer.",
+        });
+      }
+
+      const questionExists = await db.Question.exists({
+        _id: questionId,
+      });
+
+      if (!questionExists) {
+        return res.status(404).json({
+          error: "Question not found.",
+        });
+      }
+
+      const answer = await db.Answer.create({
+        question_id: questionId,
+        user_id: req.session.user.id,
+        body: body.trim(),
+      });
+
+      await db.Question.findByIdAndUpdate(questionId, {
+        $inc: { answer_count: 1 },
+      });
+
+      return res.status(201).json({
+        message: "Answer posted.",
+        id: answer._id.toString(),
+      });
+    } catch (error) {
+      console.error("Post answer error:", error);
+
+      return res.status(500).json({
+        error: "Could not post answer.",
+      });
+    }
+  }
+);
+
+// Start server
+async function startServer() {
+  try {
+    console.log(
+      "[Server] Connecting to MongoDB before starting..."
+    );
+
+    const dbInfo = await db.initDatabase();
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log("------------------------------------------");
+      console.log(`Discussion Forum running at http://localhost:${PORT}`);
+      console.log(`Active Database: ${dbInfo.details}`);
+      console.log("------------------------------------------");
+    });
+  } catch (error) {
+    console.error(
+      "[Server] Initial database connection error:",
+      error.message
+    );
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log("------------------------------------------");
+      console.log(`Discussion Forum running at http://localhost:${PORT}`);
+      console.log(
+        "Database is unavailable. Requests will retry the connection."
+      );
+      console.log("------------------------------------------");
+    });
   }
 }
 
-startServer();
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, startServer };

@@ -1,7 +1,7 @@
 {
   "name": "disscussion-forum",
   "version": "1.0.0",
-  "description": "Student Discussion Forum & Q&A Board built with Node.js, Express, HTML, CSS, JavaScript, and MySQL / SQLite.",
+  "description": "Student Discussion Forum & Q&A Board built with Node.js, Express, HTML, CSS, JavaScript, and MongoDB Atlas.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -17,8 +17,9 @@
     "student-forum",
     "nodejs",
     "express",
-    "mysql",
-    "sqlite"
+    "mongodb",
+    "mongodb-atlas",
+    "mongoose"
   ],
   "author": "Nalamati Tejaswini",
   "license": "ISC",
@@ -28,6 +29,7 @@
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
     "express-session": "^1.19.0",
+    "mongoose": "^9.11.4",
     "mysql2": "^3.24.6"
   }
 }

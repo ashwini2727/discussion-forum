@@ -1,11 +1,14 @@
 # Dependency directories
 node_modules/
 
-# Environment files and credentials
+# Environment files and secret credentials (NEVER commit to git)
 .env
+.env.*
 .env*.local
+*.env
+!.env.example
 
-# SQLite local database files (preserve privacy & data)
+# Local SQLite databases (legacy / development)
 data/*.sqlite
 data/*.sqlite-journal
 

@@ -1,6 +1,7 @@
-// Comprehensive automated test suite for DiscussHub
+// Comprehensive automated test suite for DiscussHub (MongoDB Atlas)
 const http = require("http");
 const assert = require("assert");
+require("dotenv").config();
 
 const TEST_PORT = 3100;
 process.env.PORT = TEST_PORT;
@@ -38,7 +39,6 @@ function createClient() {
             // Update cookie jar
             res.headers["set-cookie"].forEach((c) => {
               const cookiePart = c.split(";")[0];
-              // Update or append
               const name = cookiePart.split("=")[0];
               cookies = cookies.filter((existing) => !existing.startsWith(name + "="));
               if (!c.includes("Expires=Thu, 01 Jan 1970")) {
@@ -81,189 +81,43 @@ function createClient() {
 }
 
 async function runTests() {
-  console.log("=== Starting Automated Test Suite ===");
+  console.log("==================================================");
+  console.log("   Starting DiscussHub Automated Test Suite       ");
+  console.log("==================================================");
 
-  // Initialize DB and start server in background
-  const db = require("./db");
-  const dbInfo = await db.initDatabase();
-  console.log(`[Test] Using database: ${dbInfo.details}`);
-
-  // Require server logic
-  const express = require("express");
-  const session = require("express-session");
-  const bcrypt = require("bcrypt");
-  const path = require("path");
-
-  const app = express();
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
-
-  app.use(
-    session({
-      secret: "test-secret-key-12345",
-      resave: false,
-      saveUninitialized: false,
-      cookie: { httpOnly: true, sameSite: "lax", secure: false },
-    })
-  );
-
-  function requireLogin(req, res, next) {
-    if (!req.session.user) {
-      return res.status(401).json({ error: "Please log in first." });
-    }
-    next();
+  if (!process.env.MONGODB_URI) {
+    console.error("\n[Test Suite] Notice: MONGODB_URI is not set in environment or .env.");
+    console.error("To run the automated tests against MongoDB Atlas:");
+    console.error("  1. Copy .env.example to .env:");
+    console.error("     copy .env.example .env");
+    console.error("  2. In .env, set your MongoDB Atlas connection string:");
+    console.error("     MONGODB_URI=mongodb+srv://<username>:<password>@cluster.mongodb.net/forum_db?retryWrites=true&w=majority");
+    console.error("  3. Run: npm test\n");
+    process.exit(1);
   }
 
-  app.get("/api/status", (req, res) => {
-    const info = db.getDbInfo();
-    res.json({
-      message: "Discussion Forum API is running",
-      database: info.type,
-      databaseDetails: info.details,
-    });
-  });
+  // Initialize DB and server
+  const db = require("./db");
+  const dbInfo = await db.initDatabase();
+  console.log(`[Test] Connected to: ${dbInfo.details}`);
 
-  app.post("/api/signup", async (req, res) => {
-    try {
-      const { name, email, password } = req.body;
-      if (!name?.trim() || !email?.trim() || !password) {
-        return res.status(400).json({ error: "Please fill in all fields." });
-      }
-      if (password.length < 8) {
-        return res.status(400).json({ error: "Password must have at least 8 characters." });
-      }
-      const passwordHash = await bcrypt.hash(password, 10);
-      const [result] = await db.execute(
-        "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
-        [name.trim(), email.trim().toLowerCase(), passwordHash]
-      );
-      req.session.user = {
-        id: result.insertId,
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-      };
-      res.status(201).json({ message: "Account created successfully.", user: req.session.user });
-    } catch (error) {
-      if (error.code === "ER_DUP_ENTRY" || (error.message && error.message.includes("UNIQUE"))) {
-        return res.status(409).json({ error: "This email is already registered." });
-      }
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/login", async (req, res) => {
-    try {
-      const { email, password } = req.body;
-      const [rows] = await db.execute(
-        "SELECT id, name, email, password_hash FROM users WHERE email = ?",
-        [String(email || "").trim().toLowerCase()]
-      );
-      if (!rows.length || !(await bcrypt.compare(password || "", rows[0].password_hash))) {
-        return res.status(401).json({ error: "Invalid email or password." });
-      }
-      req.session.user = {
-        id: rows[0].id,
-        name: rows[0].name,
-        email: rows[0].email,
-      };
-      res.json({ message: "Login successful.", user: req.session.user });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/logout", (req, res) => {
-    req.session.destroy(() => {
-      res.clearCookie("connect.sid");
-      res.json({ message: "Logged out successfully." });
-    });
-  });
-
-  app.get("/api/me", (req, res) => {
-    res.json({ user: req.session.user || null });
-  });
-
-  app.get("/api/questions", async (req, res) => {
-    try {
-      const search = String(req.query.search || "").trim();
-      const searchPattern = `%${search}%`;
-      const [questions] = await db.execute(
-        `SELECT q.id, q.title, q.body, q.category, q.created_at, u.name AS author,
-                (SELECT COUNT(*) FROM answers a WHERE a.question_id = q.id) AS answer_count
-         FROM questions q
-         JOIN users u ON u.id = q.user_id
-         WHERE q.title LIKE ? OR q.body LIKE ? OR q.category LIKE ?
-         ORDER BY q.created_at DESC`,
-        [searchPattern, searchPattern, searchPattern]
-      );
-      res.json({ questions });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/questions", requireLogin, async (req, res) => {
-    try {
-      const title = req.body.title;
-      const body = req.body.body || req.body.description;
-      const category = req.body.category || "General";
-      if (!title?.trim() || !body?.trim()) {
-        return res.status(400).json({ error: "Enter both a title and question details." });
-      }
-      const [result] = await db.execute(
-        "INSERT INTO questions (user_id, title, body, category) VALUES (?, ?, ?, ?)",
-        [req.session.user.id, title.trim(), body.trim(), category.trim()]
-      );
-      res.status(201).json({ message: "Question posted.", id: result.insertId });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.get("/api/questions/:id/answers", async (req, res) => {
-    try {
-      const [answers] = await db.execute(
-        `SELECT a.id, a.body, a.created_at, u.name AS author
-         FROM answers a JOIN users u ON u.id = a.user_id
-         WHERE a.question_id = ?
-         ORDER BY a.created_at ASC`,
-        [req.params.id]
-      );
-      res.json({ answers });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/questions/:id/answers", requireLogin, async (req, res) => {
-    try {
-      const { body } = req.body;
-      if (!body?.trim()) {
-        return res.status(400).json({ error: "Please write an answer." });
-      }
-      const [result] = await db.execute(
-        "INSERT INTO answers (question_id, user_id, body) VALUES (?, ?, ?)",
-        [req.params.id, req.session.user.id, body.trim()]
-      );
-      res.status(201).json({ message: "Answer posted.", id: result.insertId });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
+  const { app } = require("./server");
   const server = app.listen(TEST_PORT, "127.0.0.1");
+
+  const testEmail = `test_${Date.now()}@example.com`;
+  const testPassword = "Password123!";
+  let createdUserId = null;
+  let createdQuestionId = null;
 
   try {
     const client = createClient();
-    const testEmail = `test_${Date.now()}@example.com`;
-    const testPassword = "Password123!";
 
     // Test 1: API Status
     console.log("-> Test 1: Checking /api/status");
     const statusRes = await client.get("/api/status");
     assert.strictEqual(statusRes.status, 200, "Status endpoint should return 200");
-    assert.strictEqual(statusRes.body.database, "sqlite", "Should report sqlite as database");
-    console.log("   [PASS] API status is active with SQLite");
+    assert.strictEqual(statusRes.body.database, "mongodb", "Should report mongodb as database");
+    console.log("   [PASS] API status is active with MongoDB");
 
     // Test 2: Signup with validation (password too short)
     console.log("-> Test 2: Signup validation (short password)");
@@ -285,7 +139,9 @@ async function runTests() {
     assert.strictEqual(signupRes.status, 201, "Signup should return 201");
     assert.strictEqual(signupRes.body.user.name, "Tejaswini Test");
     assert.strictEqual(signupRes.body.user.email, testEmail);
-    console.log("   [PASS] User successfully created with id:", signupRes.body.user.id);
+    assert.ok(signupRes.body.user.id, "User object must include an id");
+    createdUserId = signupRes.body.user.id;
+    console.log("   [PASS] User successfully created with id:", createdUserId);
 
     // Test 4: Duplicate Email Signup
     console.log("-> Test 4: Duplicate signup check");
@@ -312,15 +168,15 @@ async function runTests() {
       category: "Programming",
     });
     assert.strictEqual(postQRes.status, 201, "Question creation should return 201");
-    const questionId = postQRes.body.id;
-    assert.ok(questionId, "Should return a question id");
-    console.log("   [PASS] Question created with ID:", questionId);
+    createdQuestionId = postQRes.body.id;
+    assert.ok(createdQuestionId, "Should return a question id");
+    console.log("   [PASS] Question created with ID:", createdQuestionId);
 
     // Test 7: List questions and verify category + fields
     console.log("-> Test 7: Verify question in /api/questions");
     const listRes = await client.get("/api/questions");
     assert.strictEqual(listRes.status, 200);
-    const foundQ = listRes.body.questions.find((q) => q.id === questionId);
+    const foundQ = listRes.body.questions.find((q) => String(q.id) === String(createdQuestionId));
     assert.ok(foundQ, "Created question must be in list");
     assert.strictEqual(foundQ.title, "How does Node.js handle async I/O?");
     assert.strictEqual(foundQ.category, "Programming");
@@ -332,12 +188,12 @@ async function runTests() {
     console.log("-> Test 8: Search questions with query");
     const searchRes = await client.get("/api/questions?search=libuv");
     assert.strictEqual(searchRes.status, 200);
-    assert.ok(searchRes.body.questions.some((q) => q.id === questionId));
+    assert.ok(searchRes.body.questions.some((q) => String(q.id) === String(createdQuestionId)));
     console.log("   [PASS] Search filter successfully found question by keyword");
 
     // Test 9: Post an Answer to the question
-    console.log("-> Test 9: Post an answer to question ID:", questionId);
-    const postAnsRes = await client.post(`/api/questions/${questionId}/answers`, {
+    console.log("-> Test 9: Post an answer to question ID:", createdQuestionId);
+    const postAnsRes = await client.post(`/api/questions/${createdQuestionId}/answers`, {
       body: "Node.js uses libuv which offloads blocking operations to thread pool or OS kernel.",
     });
     assert.strictEqual(postAnsRes.status, 201, "Post answer should return 201");
@@ -346,8 +202,8 @@ async function runTests() {
     console.log("   [PASS] Answer posted with ID:", answerId);
 
     // Test 10: View Answers for the question
-    console.log("-> Test 10: Fetch answers for question ID:", questionId);
-    const getAnsRes = await client.get(`/api/questions/${questionId}/answers`);
+    console.log("-> Test 10: Fetch answers for question ID:", createdQuestionId);
+    const getAnsRes = await client.get(`/api/questions/${createdQuestionId}/answers`);
     assert.strictEqual(getAnsRes.status, 200);
     assert.strictEqual(getAnsRes.body.answers.length, 1);
     assert.strictEqual(getAnsRes.body.answers[0].author, "Tejaswini Test");
@@ -357,7 +213,7 @@ async function runTests() {
     // Test 11: Verify answer_count updated in question listing
     console.log("-> Test 11: Verify updated answer_count");
     const updatedListRes = await client.get("/api/questions");
-    const updatedQ = updatedListRes.body.questions.find((q) => q.id === questionId);
+    const updatedQ = updatedListRes.body.questions.find((q) => String(q.id) === String(createdQuestionId));
     assert.strictEqual(Number(updatedQ.answer_count), 1);
     console.log("   [PASS] Answer count incremented to 1");
 
@@ -401,11 +257,36 @@ async function runTests() {
     console.log("ALL 15 TESTS PASSED SUCCESSFULLY! (100% OK)");
     console.log("============================================\n");
   } finally {
+    // Clean up test data
+    try {
+      if (createdQuestionId) {
+        await db.Answer.deleteMany({ question_id: createdQuestionId });
+        await db.Question.deleteOne({ _id: createdQuestionId });
+      }
+      if (testEmail) {
+        await db.User.deleteMany({ email: testEmail });
+      }
+    } catch (cleanupErr) {
+      console.warn("[Test] Cleanup warning:", cleanupErr.message);
+    }
+
     server.close();
+    await db.closeDatabase();
   }
 }
 
 runTests().catch((err) => {
-  console.error("Test Suite Failed:", err);
+  if (err.code === 8000 || (err.message && err.message.includes("bad auth"))) {
+    console.error("\n[MongoDB Atlas Authentication Error]");
+    console.error("Connected to MongoDB Atlas cluster successfully, but authentication was rejected (bad auth : authentication failed).");
+    console.error("How to fix:");
+    console.error("  1. Log in to cloud.mongodb.com and go to: Security -> Database Access");
+    console.error("  2. Check that your Database Username matches what is in .env.");
+    console.error("  3. Click 'Edit' -> 'Edit Password', set a password, and click 'Update User'.");
+    console.error("  4. Update the password in your .env file MONGODB_URI.");
+    console.error("  5. Run: npm.cmd test\n");
+  } else {
+    console.error("Test Suite Failed:", err);
+  }
   process.exit(1);
 });
