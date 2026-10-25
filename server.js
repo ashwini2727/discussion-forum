@@ -1,4 +1,3 @@
-
 const express = require("express");
 const session = require("express-session");
 const bcrypt = require("bcrypt");
@@ -9,6 +8,9 @@ const db = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Trust proxy for Vercel deployment
+app.set("trust proxy", 1);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -24,9 +26,7 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure:
-        process.env.NODE_ENV === "production" &&
-        process.env.COOKIE_SECURE === "true",
+      secure: process.env.NODE_ENV === "production",
       maxAge: 24 * 60 * 60 * 1000,
     },
   })
@@ -408,7 +408,7 @@ app.post(
   }
 );
 
-// Start server
+// Start server locally
 async function startServer() {
   try {
     console.log(
@@ -444,4 +444,5 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = { app, startServer };
+// REQUIRED FOR VERCEL: Export app directly
+module.exports = app;
